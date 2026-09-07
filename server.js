@@ -1,7 +1,5 @@
 import express from "express";
 import cors from "cors";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 import OpenAI from "openai";
 import { GoogleGenAI } from "@google/genai";
@@ -11,11 +9,6 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Models (fallbacks)
-const DEFAULT_OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-3.5-turbo";
-const DEFAULT_FINAL_MODEL = process.env.FINAL_MODEL || DEFAULT_OPENAI_MODEL;
-const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || "models/text-bison-001";
-
 // -----------------------------
 // API CLIENTS
 // -----------------------------
@@ -23,6 +16,7 @@ const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || "models/text-bison-001"
 if (!process.env.OPENAI_API_KEY) {
   console.warn("⚠️ OPENAI_API_KEY is missing");
 }
+
 if (!process.env.GEMINI_API_KEY) {
   console.warn("⚠️ GEMINI_API_KEY is missing");
 }
@@ -39,12 +33,9 @@ const gemini = new GoogleGenAI({
 // MIDDLEWARE
 // -----------------------------
 
-app.use(helmet());
-
-const corsOrigin = process.env.CORS_ORIGIN || "*"; // set CORS_ORIGIN in production to the frontend URL
 app.use(
   cors({
-    origin: corsOrigin
+    origin: "*"
   })
 );
 
@@ -53,15 +44,6 @@ app.use(
     limit: "10mb"
   })
 );
-
-// Basic rate limiting
-const limiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: Number(process.env.RATE_LIMIT_MAX) || 60, // per IP
-  standardHeaders: true,
-  legacyHeaders: false
-});
-app.use(limiter);
 
 // -----------------------------
 // PERSONAL AI PROMPT
@@ -104,65 +86,14 @@ Your goal is to help the user understand the answer rather than simply giving an
 `;
 
 // -----------------------------
-// Helpers to extract text safely
-// -----------------------------
-
-function extractOpenAIText(resp) {
-  if (!resp) return "";
-  // SDKs differ — try common shapes
-  if (typeof resp.output_text === "string") return resp.output_text;
-  if (typeof resp.output === "string") return resp.output;
-  if (Array.isArray(resp.output)) {
-    // output might be array of objects or strings
-    return resp.output
-      .map((o) => {
-        if (typeof o === "string") return o;
-        if (o.content) {
-          if (typeof o.content === "string") return o.content;
-          if (Array.isArray(o.content)) {
-            return o.content.map((c) => c.text || c).join("");
-          }
-        }
-        // try nested text fields
-        if (o.delta && o.delta.content) return o.delta.content;
-        return "";
-      })
-      .join("\n")
-      .trim();
-  }
-  // fallback to stringifying small responses
-  try {
-    return JSON.stringify(resp).slice(0, 10000);
-  } catch {
-    return "";
-  }
-}
-
-function extractGeminiText(resp) {
-  if (!resp) return "";
-  if (typeof resp.text === "string") return resp.text;
-  if (typeof resp.output_text === "string") return resp.output_text;
-  // google genai sometimes returns candidates or content array
-  if (Array.isArray(resp.candidates)) {
-    return resp.candidates.map((c) => c.content || c.text || "").join("\n").trim();
-  }
-  if (Array.isArray(resp.outputs)) {
-    return resp.outputs.map((o) => o.text || o.content || "").join("\n").trim();
-  }
-  try {
-    return JSON.stringify(resp).slice(0, 10000);
-  } catch {
-    return "";
-  }
-}
-
-// -----------------------------
 // OPENAI
 // -----------------------------
 
 async function askOpenAI(message, history = []) {
   const conversation = history
-    .map((item) => `${item.role}: ${item.content}`)
+    .map((item) => {
+      return `${item.role}: ${item.content}`;
+    })
     .join("\n");
 
   const prompt = `
@@ -178,17 +109,12 @@ Analyze this request independently.
 Give a detailed but useful analysis that another AI can review.
 `;
 
-  try {
-    const response = await openai.responses.create({
-      model: process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL,
-      input: prompt
-    });
+  const response = await openai.responses.create({
+    model: process.env.OPENAI_MODEL,
+    input: prompt
+  });
 
-    return extractOpenAIText(response);
-  } catch (err) {
-    console.error("OpenAI request failed:", err?.message || err);
-    return `OpenAI error: ${err?.message || "unknown"}`;
-  }
+  return response.output_text;
 }
 
 // -----------------------------
@@ -197,7 +123,9 @@ Give a detailed but useful analysis that another AI can review.
 
 async function askGemini(message, history = []) {
   const conversation = history
-    .map((item) => `${item.role}: ${item.content}`)
+    .map((item) => {
+      return `${item.role}: ${item.content}`;
+    })
     .join("\n");
 
   const prompt = `
@@ -221,24 +149,23 @@ Look for:
 Do not blindly follow another model's assumptions.
 `;
 
-  try {
-    const response = await gemini.models.generateContent({
-      model: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
-      contents: prompt
-    });
+  const response = await gemini.models.generateContent({
+    model: process.env.GEMINI_MODEL,
+    contents: prompt
+  });
 
-    return extractGeminiText(response);
-  } catch (err) {
-    console.error("Gemini request failed:", err?.message || err);
-    return `Gemini error: ${err?.message || "unknown"}`;
-  }
+  return response.text;
 }
 
 // -----------------------------
 // FINAL SYNTHESIS
 // -----------------------------
 
-async function createFinalAnswer(message, openaiAnswer, geminiAnswer) {
+async function createFinalAnswer(
+  message,
+  openaiAnswer,
+  geminiAnswer
+) {
   const prompt = `
 ${SYSTEM_PROMPT}
 
@@ -269,17 +196,12 @@ Do not mention that you are comparing models.
 Return only the final response for the user.
 `;
 
-  try {
-    const response = await openai.responses.create({
-      model: process.env.FINAL_MODEL || DEFAULT_FINAL_MODEL,
-      input: prompt
-    });
+  const response = await openai.responses.create({
+    model: process.env.FINAL_MODEL,
+    input: prompt
+  });
 
-    return extractOpenAIText(response);
-  } catch (err) {
-    console.error("Final synthesis failed:", err?.message || err);
-    return `Final synthesis error: ${err?.message || "unknown"}`;
-  }
+  return response.output_text;
 }
 
 // -----------------------------
@@ -299,43 +221,53 @@ app.get("/api/health", (req, res) => {
 
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, history = [], mode = "auto" } = req.body;
+    const {
+      message,
+      history = [],
+      mode = "auto"
+    } = req.body;
 
     if (!message || !message.trim()) {
-      return res.status(400).json({ error: "Message is required" });
+      return res.status(400).json({
+        error: "Message is required"
+      });
     }
 
-    if (!Array.isArray(history)) {
-      return res.status(400).json({ error: "History must be an array" });
-    }
-
-    console.info("User request length:", message.length);
-    console.debug("Mode:", mode);
+    console.log("User:", message);
+    console.log("Mode:", mode);
 
     // Run both models at the same time
-    const [openaiAnswer, geminiAnswer] = await Promise.all([
-      askOpenAI(message, history),
-      askGemini(message, history)
-    ]);
+    const [openaiAnswer, geminiAnswer] =
+      await Promise.all([
+        askOpenAI(message, history),
+        askGemini(message, history)
+      ]);
 
-    console.info("Model analyses completed");
+    console.log("OpenAI analysis completed");
+    console.log("Gemini analysis completed");
 
     // Final synthesis
-    const finalAnswer = await createFinalAnswer(message, openaiAnswer, geminiAnswer);
+    const finalAnswer = await createFinalAnswer(
+      message,
+      openaiAnswer,
+      geminiAnswer
+    );
 
-    const payload = { answer: finalAnswer };
+    res.json({
+      answer: finalAnswer,
 
-    // Only include analyses when not in production
-    if (process.env.NODE_ENV !== "production") {
-      payload.analysis = {
+      // Useful for debugging.
+      // Remove these in production if you don't want
+      // the frontend to receive internal analyses.
+      analysis: {
         openai: openaiAnswer,
         gemini: geminiAnswer
-      };
-    }
+      }
+    });
 
-    res.json(payload);
   } catch (error) {
-    console.error("API ERROR:", error?.message || error);
+    console.error("API ERROR:", error);
+
     res.status(500).json({
       error: "AI request failed",
       message: "Please try again later."
