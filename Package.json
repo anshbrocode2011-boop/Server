@@ -1,16 +1,4 @@
 {
-  "name": "personal-ai-backend",
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
-  },
-  "dependencies": {
-    "@google/genai": "latest",
-    "cors": "latest",
-    "dotenv": "latest",
-    "express": "latest",
-    "openai": "latest"
-  }
+  "_deprecated": "This file was renamed to package.json (lowercase) to fix Render detection. Please remove this file to avoid confusion. See ./package.json for the actual package manifest.",
+  "_note": "If you want me to delete this file instead, confirm and I'll remove it." 
 }
