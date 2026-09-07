@@ -1,4 +1,0 @@
-{
-  "_deprecated": "This file was renamed to package.json (lowercase) to fix Render detection. Please remove this file to avoid confusion. See ./package.json for the actual package manifest.",
-  "_note": "If you want me to delete this file instead, confirm and I'll remove it." 
-}
