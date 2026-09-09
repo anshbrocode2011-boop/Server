@@ -17,7 +17,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*")
   .map((s) => s.trim().replace(/\/+$/, ""))
   .filter(Boolean);
 
-const REQUEST_TIMEOUT_MS = 30000;
+const REQUEST_TIMEOUT_MS = 55000;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
 const MAX_MESSAGE_LENGTH = 8000;
@@ -135,6 +135,66 @@ function trimHistory(history) {
     .slice(-MAX_HISTORY_MESSAGES);
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callGeminiOnce({ contents, systemPrompt }) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+  const res = await fetchWithTimeout(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents,
+      generationConfig: { maxOutputTokens: 4096 },
+    }),
+  });
+
+  if (res.status === 400) {
+    const body = await res.text().catch(() => "");
+    console.error("[Gemini 400]", body);
+    throw new ApiError(400, "Gemini rejected the request. Check the model, message, or image format.");
+  }
+  if (res.status === 401 || res.status === 403) {
+    throw new ApiError(500, "Gemini API authentication failed. Check GEMINI_API_KEY in Render.");
+  }
+  if (res.status === 429) {
+    throw new ApiError(429, "Gemini rate limit reached. Please try again in a moment.");
+  }
+  if (res.status === 404) {
+    const body = await res.text().catch(() => "");
+    console.error("[Gemini 404]", body);
+    throw new ApiError(
+      500,
+      `Gemini model "${GEMINI_MODEL}" was not found. It may have been retired by Google — set GEMINI_MODEL in Render to "gemini-flash-latest" or another current model.`
+    );
+  }
+  if (res.status === 503) {
+    const body = await res.text().catch(() => "");
+    console.error("[Gemini 503]", body);
+    const err = new ApiError(503, "Gemini is temporarily overloaded. Please try again in a moment.");
+    err.retryable = true;
+    throw err;
+  }
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "");
+    console.error("[Gemini error]", res.status, errBody);
+    throw new ApiError(502, "Gemini couldn't process that request.");
+  }
+
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("\n").trim();
+
+  if (!text) {
+    console.error("[Gemini empty response]", JSON.stringify(data));
+    throw new ApiError(502, "Gemini returned an empty response. Please try again.");
+  }
+
+  return text;
+}
+
 async function callGemini({ message, image, mode, history, profile }) {
   if (!GEMINI_API_KEY) {
     throw new ApiError(500, "Gemini is not configured. Add GEMINI_API_KEY in Render Environment Variables.");
@@ -159,52 +219,22 @@ async function callGemini({ message, image, mode, history, profile }) {
   if (image) parts.push({ inlineData: { mimeType: image.mimeType, data: image.data } });
   contents.push({ role: "user", parts });
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
-  const res = await fetchWithTimeout(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents,
-      generationConfig: { maxOutputTokens: 1600 },
-    }),
-  });
-
-  if (res.status === 400) {
-    const body = await res.text().catch(() => "");
-    console.error("[Gemini 400]", body);
-    throw new ApiError(400, "Gemini rejected the request. Check the model, message, or image format.");
+  const RETRY_DELAYS_MS = [800, 1600, 3200];
+  let lastErr;
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await callGeminiOnce({ contents, systemPrompt });
+    } catch (err) {
+      lastErr = err;
+      if (err.retryable && attempt < RETRY_DELAYS_MS.length) {
+        console.warn(`[Gemini] 503 overloaded, retrying in ${RETRY_DELAYS_MS[attempt]}ms (attempt ${attempt + 1})`);
+        await delay(RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      throw err;
+    }
   }
-  if (res.status === 401 || res.status === 403) {
-    throw new ApiError(500, "Gemini API authentication failed. Check GEMINI_API_KEY in Render.");
-  }
-  if (res.status === 429) {
-    throw new ApiError(429, "Gemini rate limit reached. Please try again in a moment.");
-  }
-  if (res.status === 404) {
-    const body = await res.text().catch(() => "");
-    console.error("[Gemini 404]", body);
-    throw new ApiError(
-      500,
-      `Gemini model "${GEMINI_MODEL}" was not found. It may have been retired by Google — set GEMINI_MODEL in Render to "gemini-flash-latest" or another current model.`
-    );
-  }
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => "");
-    console.error("[Gemini error]", res.status, errBody);
-    throw new ApiError(502, "Gemini couldn't process that request.");
-  }
-
-  const data = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("\n").trim();
-
-  if (!text) {
-    console.error("[Gemini empty response]", JSON.stringify(data));
-    throw new ApiError(502, "Gemini returned an empty response. Please try again.");
-  }
-
-  return text;
+  throw lastErr;
 }
 
 app.get("/", (req, res) => {
